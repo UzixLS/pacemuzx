@@ -2652,7 +2652,7 @@ msg_lp:        ld  a,(hl)
                and a
                ret z
                rst 16               ; PRINT-A
-               inc l
+               inc hl
                jr  msg_lp
 
 
