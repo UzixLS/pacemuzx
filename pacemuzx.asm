@@ -4,6 +4,8 @@
 
 debug:         equ 0                ; non-zero for border stripes showing CPU use
 colour:        equ 1                ; non-zero for switchable colour/mono, zero for mono-only
+plus3:         equ 0
+profi:         equ 1
 
 ; Memory maps
 ;
@@ -12,15 +14,16 @@ colour:        equ 1                ; non-zero for switchable colour/mono, zero 
 ; b000-bfff - unshifted tiles+sprites
 ; c000-ffff - 16K Pac-Man ROM
 ;
-; Emulation (special paging 0/1/2/3):
+; Emulation (special paging 0/1/2/3 on +3 or 0/1/2/7 on Profi):
 ; 0000-3fff - 16K Pac-Man ROM
 ; 4000-50ff - Pac-Man display, I/O and working RAM
-; 5100-7fff - unused
+; 5100-5fff - unused
+; 6000-7fff - 8K sound table
 ; 8000-9fff - 2nd half of sprite data
 ; a000-b1ff - emulation code
 ; b200-bfff - look-up tables
-; c000-dfff - 8K sound table
-; e000-ffff - first 8K of Pac-Man ROM (unpatched)
+; c000-dfff - unused
+; e000-ffff - first 8K of Pac-Man ROM (unpatched) - only on +3
 ;
 ; Graphics (normal paging R3/5/2/7):
 ; 0000-3fff - Spectrum 48K ROM
@@ -76,7 +79,7 @@ tile_data_2:   equ tile_data_4 + (192*2*6) ;          00001111 11000000
 end_tile_data: equ tile_data_2 + (192*1*6) ;                   00111111
 
 ; sound look-up table
-sound_table:   equ &c000
+sound_table:   equ &6000
 
 
 MACRO set_border, bordcol
@@ -85,6 +88,44 @@ IF debug
     out (border),a
 ENDIF
 ENDM
+
+IF plus3
+MACRO page_rom_fast
+     ld  a,%00000001      ; +3 special paging, banks 0/1/2/3
+     ld  bc,&1ffd
+     out (c),a
+ENDM
+
+MACRO page_screen_fast
+     ld  a,%00000100      ; +3 normal paging, R3/5/2/7
+     ld  bc,&1ffd
+     out (c),a
+ENDM
+ENDIF
+
+IF profi
+MACRO page_rom_fast     
+     ld  a,(scr_page_rom) ; R/5/2/1
+     ld  bc,&7ffd
+     out (c),a
+
+     ld  a,%00011000      ; 0/1/2/7
+     ld  bc,&dffd
+     out (c),a
+ENDM
+
+MACRO page_screen_fast 
+     ld  a,(scr_page)     ; 0/7/2/7
+     ld  bc,&7ffd
+     out (c),a 
+
+     ld  a,%00000000      ; R/5/2/7
+     ld  bc,&dffd
+     out (c),a
+ENDM
+ENDIF
+
+
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -106,37 +147,39 @@ start2:        di
 
                ld  a,(&5b5c)        ; sysvar holding 128K paging
                ex  af,af'           ; keep safe
-               ld  a,%00000001      ; special paging, banks 0/1/2/3
-               ld  bc,&1ffd         ; +3 paging port
-               out (c),a            ; attempt paging
+               page_rom_fast
                ld  a,(3)            ; peek value in Pac-Man ROM
                cp  &ed              ; as expected?
                jr  z,start3         ; if so, start up
 
                ex  af,af'
+               ld  bc,&7ffd
                out (c),a            ; restore 128K paging (disturbed due to partial address decoding)
                ei
 
-               ld  hl,plus2a3_msg
+               ld  hl,spechw_msg
                jp  print_msg
 
 ; Next, move any data from load position to final location
 start3:        ld  sp,new_stack
 
+IF plus3
                ld  hl,&0000
                ld  de,&e000
                ld  bc,&2000
                ldir                 ; copy 8K of ROM to &e000 (start of page 3)
+ENDIF
 
                call patch_rom       ; patch the ROM while it's at the correct location
-
-               ld  a,%00000100      ; +3 normal paging
-               ld  bc,&1ffd
-               out (c),a            ; restore R3/5/2/0, for ROM access at &c000
-
-
+               page_screen_fast     ; restore R3/5/2/0, for ROM access at &c000
+IF profi
+               ld a, 0
+               ld  bc,&7ffd
+               out (c),a 
+               jp no_specnet
+ENDIF
                call chk_specnet     ; check if Spectranet traps are enabled
-               jr  z,no_specnet     ; skip forwards if not
+               jr  no_specnet     ; skip forwards if not
 
                ld  hl,specnet_msg   ; prompt to disable traps
                call print_msg
@@ -214,18 +257,14 @@ not_hard:      ld  (&5080),a
 
 page_rom:      push af
                push bc
-               ld  a,%00000001      ; +3 special paging, banks 0/1/2/3
-               ld  bc,&1ffd
-               out (c),a
+               page_rom_fast
                pop bc
                pop af
                ret
 
 page_screen:   push af
                push bc
-               ld  a,%00000100      ; +3 normal paging, R3/5/2/7
-               ld  bc,&1ffd
-               out (c),a
+               page_screen_fast
                pop bc
                pop af
                ret
@@ -269,8 +308,10 @@ patch_rom:     ld  a,&56            ; ED *56*
                ld  a,&b0            ; LSB of address in look-up table
                ld  (&3ffa),a        ; skip memory test (actual code starts at &3000)
 
+IF plus3
                ld  hl,&e0f6         ; change AND &1F to OR &E0 so ROM peeks are from unmodified copy of the ROM
                ld  (&2a2d),hl       ; (used as random number source for blue ghost movements)
+ENDIF
 
                ld  a,&cd            ; CALL nn
                ld  (&2c62),a
@@ -310,12 +351,12 @@ do_int_hook:   ld  (old_stack+1),sp
                push hl
                push ix
 
-               call do_flip         ; show last frame, page in new one
-
                ld  hl,&5062         ; sprite 1 x
                inc (hl)             ; offset 1 pixel left (mirrored)
                ld  hl,&5064         ; sprite 2 x
                inc (hl)
+
+               call do_flip         ; show last frame, page in new one
 
 set_border 1
                call do_restore      ; restore under the old sprites
@@ -377,6 +418,11 @@ set_int_chain: ld  a,i              ; bus value originally written to port &00
 do_flip:       push af
                push bc
 
+IF profi
+               ld  a,(scr_page_rom) ; current screen
+               xor %00001000        ; toggle active screen bit
+               ld  (scr_page_rom),a
+ENDIF
                ld  a,(scr_page)     ; current screen
                xor %00001000        ; toggle active screen bit
                ld  (scr_page),a
@@ -393,7 +439,7 @@ do_flip:       push af
                ret
 
 scr_page:      defb %00000111       ; normal screen (page 5), page 7 at &c000
-
+scr_page_rom:  defb %00000001       ; normal screen (page 5), page 1 at &4000 (for profi mode)
 
 ; Set the maze palette colour by detecting the attribute used for the maze white
 ; We also need to remove the ghost box door, as the real attribute wipe does.
@@ -506,9 +552,7 @@ pill_1:        cp  &9f
                cp  &10
                jr  nz,pill_clear_1
 pill_1_on:
-               ld  a,%00000100      ; +3 normal paging, R3/5/2/7
-               ld  bc,&1ffd
-               out (c),a
+               page_screen_fast
 
                ld  a,h
                or  ixh
@@ -528,14 +572,11 @@ pill_1_on:
                inc h
                ld  (hl),d
 
-               ld  a,%00000001      ; +3 special paging, banks 0/1/2/3
-               ld  bc,&1ffd
-               out (c),a            ; page ROM
+               page_rom_fast
                ret
 ; clear pill
-pill_clear_1:  ld  a,%00000100      ; +3 normal paging, R3/5/2/7
-               ld  bc,&1ffd
-               out (c),a
+pill_clear_1:
+               page_screen_fast
 
                ld  a,h
                or  ixh
@@ -554,9 +595,7 @@ pill_clear_1:  ld  a,%00000100      ; +3 normal paging, R3/5/2/7
                inc h
                ld  (hl),a
 
-               ld  a,%00000001      ; +3 special paging, banks 0/1/2/3
-               ld  bc,&1ffd
-               out (c),a            ; page ROM
+               page_rom_fast
                ret
 
 
@@ -622,9 +661,7 @@ pill_2:        cp  &10
                dec l
                inc h
 
-               ld  a,%00000001      ; +3 special paging, banks 0/1/2/3
-               ld  bc,&1ffd
-               out (c),a            ; page ROM
+               page_rom_fast
                ret
 
 ; clear pill
@@ -698,9 +735,7 @@ pill_clear_2:  call page_screen
                and e
                ld  (hl),a
 
-               ld  a,%00000001      ; +3 special paging, banks 0/1/2/3
-               ld  bc,&1ffd
-               out (c),a            ; page ROM
+               page_rom_fast
                ret
 
 
@@ -1175,9 +1210,7 @@ draw_tile_x:   ld  a,b
                add hl,hl            ; *4
                add hl,bc            ; *6
 
-               ld  a,%00000100      ; +3 normal paging, R3/5/2/7
-               ld  bc,&1ffd
-               out (c),a
+               page_screen_fast
 
                ex  af,af'
                rra
@@ -1297,10 +1330,7 @@ tile_2_lp:     ld  a,(de)
                jr  tile_exit
 
 tile_exit:     
-               ld  a,%00000001      ; +3 special paging, banks 0/1/2/3
-               ld  bc,&1ffd
-               out (c),a            ; page ROM
-
+               page_rom_fast
                exx
                ret
 
@@ -2206,6 +2236,7 @@ chk_life:      ld  b,scradtab/256
 sound_init:    ld  bc,sound_table
 
 sound_lp:      ld  a,b              ; map entry address to freq
+               add a, &60
                and &3f
                rra
                ld  d,a
@@ -2247,7 +2278,7 @@ div_ok:        exx
                and %00000111
                out (border),a       ; flash the border to show we're busy
 
-               bit 5,b
+               bit 7,b
                jr  z,sound_lp
 
                xor a
@@ -2336,7 +2367,8 @@ not_silent:    ex  af,af'           ; save volume for caller
                rr  l
 eat_sound:
                ld  a,h
-               or  &c0              ; MSB of sound table
+               and &1f
+               or  &60              ; MSB of sound table
                ld  h,a
                res 0,l
 
@@ -2662,9 +2694,15 @@ loading_msg:   defm "pacemuzx v1.5"
 specnet_msg:   defm "Disable Spectranet traps now..."
                defb 0
 
-plus2a3_msg:   defm "This program requires a +2A/+3"
+IF plus3
+spechw_msg:    defm "This program requires a +2A/+3"
                defb 0
+ENDIF
 
+IF profi
+spechw_msg:    defm "This program requires a Profi with correct #DFFD D3/D4 bits"
+               defb 0
+ENDIF
 
                defs (-$)%256          ; align to next 256-byte boundary
 

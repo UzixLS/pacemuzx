@@ -1,7 +1,7 @@
 Pac-Man Emulator for Sinclair Spectrum (v1.5)
 ---------------------------------------------
 
-This program requires a Spectrum +2A/+2B/+3, and won't work on earlier models.
+This program requires a Spectrum +2A/+2B/+3 or Profi, and won't work on earlier models.
 
 The Pac-Man ROMs cannot be supplied with this program, so you must supply your
 own copies of the following files (from the Midway ROM set):
